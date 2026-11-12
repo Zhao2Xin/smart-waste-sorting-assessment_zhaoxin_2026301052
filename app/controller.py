@@ -195,6 +195,7 @@ class SortingController:
                 self._set_state(SystemState.EXECUTING)
             else:
                 return
+            self._deadline = self.clock() + self.ack_timeout
             
         elif command == Command.ACTION_DONE:
             if self.state == SystemState.EXECUTING:
