@@ -223,7 +223,7 @@ class SortingWorker(QtCore.QThread):
                 DRAW_WASTE_NAMES[detection.waste_type],
                 detection.confidence * 100,
             )
-            cv2.putText(
+            cv2.putText(    
                 frame,
                 label,
                 (x1, max(26, y1 - 10)),

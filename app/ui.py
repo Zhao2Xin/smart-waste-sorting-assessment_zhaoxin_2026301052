@@ -81,31 +81,32 @@ class MainWindow(QtWidgets.QMainWindow):
         title.setFont(title_font)
         header.addWidget(title)
         header.addStretch(1)
-        header.addWidget(QtWidgets.QLabel("系统状态："))
-        self.state_label = QtWidgets.QLabel("等待启动")
-        self.state_label.setMinimumWidth(130)
-        header.addWidget(self.state_label)
-        header.addWidget(QtWidgets.QLabel("下位机："))
-        self.connection_label = QtWidgets.QLabel("未连接")
-        self.connection_label.setMinimumWidth(75)
-        header.addWidget(self.connection_label)
-        header.addWidget(QtWidgets.QLabel("FPS："))
-        self.fps_label = QtWidgets.QLabel("0")
-        self.fps_label.setMinimumWidth(35)
-        header.addWidget(self.fps_label)
-        root.addLayout(header)
 
-        status_group = QtWidgets.QGroupBox("输入与模型")
-        status_layout = QtWidgets.QGridLayout(status_group)
-        status_layout.addWidget(QtWidgets.QLabel("当前输入"), 0, 0)
+        status_layout = QtWidgets.QVBoxLayout()
+        status_layout.setSpacing(6)
+        self.state_label = QtWidgets.QLabel("等待启动")
+        self.connection_label = QtWidgets.QLabel("未连接")
+        self.fps_label = QtWidgets.QLabel("0")
         self.source_label = QtWidgets.QLabel("正在打开默认考核视频…")
-        self.source_label.setWordWrap(True)
+        self.source_label.setTextFormat(QtCore.Qt.PlainText)
         self.source_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
-        status_layout.addWidget(self.source_label, 0, 1)
-        status_layout.addWidget(QtWidgets.QLabel("YOLO 模型"), 1, 0)
         self.model_label = QtWidgets.QLabel("等待加载…")
-        status_layout.addWidget(self.model_label, 1, 1)
-        root.addWidget(status_group)
+        for fields in (
+            (("系统状态", self.state_label), ("下位机", self.connection_label), ("FPS", self.fps_label)),
+            (("当前输入", self.source_label), ("YOLO 模型", self.model_label)),
+        ):
+            row = QtWidgets.QHBoxLayout()
+            row.setSpacing(6)
+            for index, (caption, value) in enumerate(fields):
+                if index:
+                    row.addSpacing(7)
+                value.setObjectName("statusValue")
+                row.addWidget(QtWidgets.QLabel(caption))
+                row.addWidget(value)
+            row.addStretch()
+            status_layout.addLayout(row)
+        header.addLayout(status_layout)
+        root.addLayout(header)
 
         splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         vision_group = QtWidgets.QGroupBox("目标检测画面")
@@ -124,9 +125,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
         result_group = QtWidgets.QGroupBox("当前 YOLO 识别结果")
         result_layout = QtWidgets.QFormLayout(result_group)
+        result_layout.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldsStayAtSizeHint)
         self.class_label = QtWidgets.QLabel("—")
         self.waste_label = QtWidgets.QLabel("—")
         self.confidence_label = QtWidgets.QLabel("—")
+        for value in (self.class_label, self.waste_label, self.confidence_label):
+            value.setObjectName("detectionValue")
         result_layout.addRow("模型类别", self.class_label)
         result_layout.addRow("垃圾分类", self.waste_label)
         result_layout.addRow("置信度", self.confidence_label)
@@ -134,9 +138,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
         stats_group = QtWidgets.QGroupBox("下位机确认后的分类统计")
         stats_layout = QtWidgets.QGridLayout(stats_group)
-        stats_layout.addWidget(QtWidgets.QLabel("垃圾类别"), 0, 0)
-        stats_layout.addWidget(QtWidgets.QLabel("数量"), 0, 1)
-        stats_layout.addWidget(QtWidgets.QLabel("桶状态"), 0, 2)
+        stats_layout.setHorizontalSpacing(18)
+        stats_layout.setColumnStretch(3, 1)
+        for column, title_text in enumerate(("垃圾类别", "数量", "桶状态")):
+            column_label = QtWidgets.QLabel(title_text)
+            if column:
+                column_label.setAlignment(QtCore.Qt.AlignCenter)
+            stats_layout.addWidget(column_label, 0, column)
         for row, waste_type in enumerate(
             (WasteType.RECYCLABLE, WasteType.KITCHEN, WasteType.HAZARDOUS, WasteType.OTHER),
             start=1,
@@ -167,14 +175,14 @@ class MainWindow(QtWidgets.QMainWindow):
         communication_layout.addWidget(self.log_browser)
         info_layout.addWidget(communication_group, 1)
         splitter.addWidget(information)
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 2)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
         splitter.setChildrenCollapsible(False)
-        splitter.setSizes([680, 440])
+        splitter.setSizes([820, 320])
         root.addWidget(splitter, 1)
 
         controls = QtWidgets.QGroupBox("运行控制")
-        controls_layout = QtWidgets.QHBoxLayout(controls)
+        self.controls_layout = controls_layout = QtWidgets.QHBoxLayout(controls)
         self.video_button = QtWidgets.QPushButton("导入视频")
         self.camera_button = QtWidgets.QPushButton("打开摄像头")
         self.start_button = QtWidgets.QPushButton("开始识别")
@@ -204,6 +212,9 @@ class MainWindow(QtWidgets.QMainWindow):
             "#primaryButton:hover, #primaryButton:focus { background: #0c8073; }"
             "#primaryButton:disabled { background: #e1eae8; color: #526b67; border-color: #d2dedb; }"
             "#titleLabel { color: #17323c; }"
+            "#statusValue { background: #dce9ee; border-radius: 5px; padding: 3px 7px; }"
+            "#detectionValue { background: #dce9ee; border-radius: 5px; padding: 2px 7px;"
+            " font-weight: bold; }"
             "#videoPreview { background: #182630; color: #eff6fa; border-radius: 6px; }"
             "QTreeWidget { color: #253842; background: #fbfcfd; border: 1px solid #d5e0e7;"
             " border-radius: 5px; }"
@@ -222,7 +233,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.video_slider.setAccessibleName("视频进度")
         self.video_slider.setTracking(False)
         timeline_layout.addWidget(self.video_slider)
-        steps = QtWidgets.QHBoxLayout()
+        self.timeline_steps = steps = QtWidgets.QHBoxLayout()
         self.previous_frame = QtWidgets.QPushButton("上一帧")
         self.next_frame = QtWidgets.QPushButton("下一帧")
         self.first_frame = QtWidgets.QPushButton("回到开头")
@@ -245,7 +256,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.worker.bins_changed.connect(self.update_bins)
         self.worker.detection_changed.connect(self.update_detection)
         self.worker.model_changed.connect(self.model_label.setText)
-        self.worker.source_changed.connect(self.source_label.setText)
+        self.worker.source_changed.connect(self.update_source_label)
         self.worker.source_finished.connect(self.on_source_finished)
         self.worker.log_message.connect(self.append_log)
         self.worker.connection_changed.connect(self.update_connection)
@@ -319,12 +330,24 @@ class MainWindow(QtWidgets.QMainWindow):
     def set_video_metadata(self, frames: int, fps: float) -> None:
         self._video_frames = frames
         self._video_fps = fps
+        if frames > 0:
+            self.timeline_steps.addWidget(self.start_button)
+        else:
+            self.controls_layout.insertWidget(3, self.start_button)
+        self.start_button.show()
         self.timeline.setVisible(frames > 0)
         with QtCore.QSignalBlocker(self.video_slider):
             self.video_slider.setRange(0, max(0, frames - 1))
             self.video_slider.setValue(0)
         self._video_frame = 0
         self._show_video_position(0)
+
+    @QtCore.pyqtSlot(str)
+    def update_source_label(self, source: str) -> None:
+        self.source_label.setToolTip(source)
+        self.source_label.setText(self.source_label.fontMetrics().elidedText(
+            source, QtCore.Qt.ElideMiddle, 265,
+        ))
 
     @staticmethod
     def _format_time(seconds: float) -> str:
