@@ -53,6 +53,8 @@ class SortingController:
         self._compress_sent = False
         self._sequence = 0
         self._active_sequence = None  # type: Optional[int]
+        # 用于判断压缩完成后回到 COOLDOWN还是IDLE
+        self._after_compressing = SystemState.COOLDOWN
 
     def _emit(self, name: str, **data) -> None:
         self.event_callback(name, data)
@@ -85,7 +87,54 @@ class SortingController:
 
     def process_detection(self, detection: Optional[Detection]) -> None:
         """TODO 4：完成稳定帧判定、冷却消抖和分类指令触发。"""
-        return
+        if self.state == SystemState.IDLE:
+            if detection is None:
+                self._stable_count = 0
+                self._candidate = None
+                return
+            waste_type = detection.waste_type
+            if self._stable_count == 0:
+                self._candidate = waste_type
+                self._stable_count = 1
+                if self.stable_frames == 1:
+                    self._candidate = None
+                    self._stable_count = 0
+                    self._send_classification(waste_type)
+                return
+            if waste_type == self._candidate:
+                self._stable_count += 1
+                if self._stable_count >= self.stable_frames:
+                    self._candidate = None
+                    self._stable_count = 0
+                    self._send_classification(waste_type)
+                return
+            else:
+                self._stable_count = 1
+                self._candidate = waste_type
+                return
+        if self.state == SystemState.COOLDOWN:
+            if detection is None:
+                self._missing_frames += 1
+                if self._missing_frames >= 8:
+                    self._missing_frames = 0
+                    self._set_state(SystemState.IDLE)
+                return
+            else:
+                self._missing_frames = 0
+        if self.state == SystemState.COMPRESSING or (
+            self.state == SystemState.WAIT_ACK
+            and self._last_packet is not None
+            and self._last_packet.command == Command.START_COMPRESS
+        ):
+            if detection is None:
+                self._missing_frames += 1
+                if self._missing_frames >= 8:
+                    self._missing_frames = 0
+                    self._after_compressing = SystemState.IDLE
+                return
+            else:
+                self._missing_frames = 0
+                
 
     def _send_packet(self, packet: Packet, wait_for_reply: bool = True) -> None:
         try:
@@ -102,18 +151,88 @@ class SortingController:
 
     def _send_classification(self, waste_type: WasteType) -> None:
         """TODO 5：处理满载、序号，并发送 WASTE_RESULT。"""
-        return
+        if self.bin_full[waste_type]:
+            self._set_state(SystemState.COOLDOWN)
+            return
+        else:
+            self._sequence = (self._sequence + 1) & 0xFF # 保证序号小于256
+            self._active_sequence = self._sequence
+            self.pending = waste_type
+            packet = Packet(Command.WASTE_RESULT, bytes([self._sequence, waste_type]))
+            self._set_state(SystemState.WAIT_ACK)
+            self._send_packet(packet)
+            
 
     def poll(self) -> None:
         """TODO 6：轮询接收；超时后重发，超过次数进入 ERROR。"""
         for packet in self.transport.poll():
             self._emit("rx", packet=packet.encode().hex(" ").upper())
             self.handle_packet(packet)
+        if self.state not in (SystemState.WAIT_ACK, SystemState.EXECUTING, SystemState.COMPRESSING):
+            return
+        if self._deadline > self.clock():
+            return
+        if self._retry_count >= self.max_retries:
+            self._set_state(SystemState.ERROR)
+            return
+        # 超时重发
+        self._send_packet(self._last_packet, wait_for_reply=False)
+        if self.state == SystemState.ERROR:
+            return
+        self._retry_count += 1
+        self._deadline = self.clock() + self.ack_timeout
 
     def handle_packet(self, packet: Packet) -> None:
         """TODO 7：处理 ACK、ACTION_DONE、BIN_FULL 和 ERROR。"""
-        return
+        command = packet.command
+        payload = packet.payload
+        if command == Command.ACK:
+            if self.state != SystemState.WAIT_ACK:
+                return
+            if payload == bytes([Command.START_COMPRESS, self._active_sequence]) and self._last_packet.command == Command.START_COMPRESS:
+                self._set_state(SystemState.COMPRESSING)
+            elif payload == bytes([Command.WASTE_RESULT, self._active_sequence]) and self._last_packet.command == Command.WASTE_RESULT:
+                self._set_state(SystemState.EXECUTING)
+            else:
+                return
+            
+        elif command == Command.ACTION_DONE:
+            if self.state == SystemState.EXECUTING:
+                if payload == bytes([self._active_sequence]):
+                    self.counts[self.pending] += 1
+                    self.pending = None
+                    self._active_sequence = None
+                    self._last_packet = None      
+                    self._set_state(SystemState.COOLDOWN)    
+                    self._emit("counts", values=self.named_counts())
+                    # 达到阈值后压缩
+                    if sum(self.counts.values()) == self.compress_after:                         
+                        self._maybe_compress()
+            elif self.state == SystemState.COMPRESSING and (bytes([self._active_sequence]) == payload):
+                self._active_sequence = None
+                self._last_packet = None
+                if self._after_compressing == SystemState.IDLE:
+                    self._missing_frames = 0
+                self._set_state(self._after_compressing)
+        elif command == Command.BIN_FULL:
+            if len(payload) != 1 or not 0x01 <= payload[0] <= 0x04:
+                return
+            self.bin_full[payload[0]] = True
+            self._emit("bins", values=self.named_bins())
+        elif command == Command.ERROR:
+            message = payload.decode("utf-8", errors="replace")
+            self._set_state(SystemState.ERROR)
+            self._emit("log", message=f"下位机报错：{message}")
+
+
+
 
     def _maybe_compress(self) -> None:
         """加分项：达到阈值后发送一次 START_COMPRESS。"""
-        return
+
+        self._after_compressing = SystemState.COOLDOWN
+        self._sequence = (self._sequence + 1) & 0xFF
+        self._active_sequence = self._sequence
+        self._set_state(SystemState.WAIT_ACK)
+        self._send_packet(Packet(Command.START_COMPRESS, bytes([self._sequence])))
+        self._compress_sent = True

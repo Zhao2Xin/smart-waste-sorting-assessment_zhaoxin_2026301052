@@ -38,6 +38,9 @@ class CameraFrameSource(FrameSource):
         self.cap = cv2.VideoCapture(camera_index)
         if not self.cap.isOpened():
             raise RuntimeError("无法打开摄像头：{}".format(camera_index))
+        if self.cap.getBackendName() == "V4L2":
+            # Prefer compressed frames for USB cameras forwarded through WSL.
+            self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
         self.frame_count = 0
         self.source_fps = float(self.cap.get(cv2.CAP_PROP_FPS))
 

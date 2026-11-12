@@ -37,6 +37,9 @@ class SortingWorker(QtCore.QThread):
     model_changed = QtCore.pyqtSignal(str)
     source_changed = QtCore.pyqtSignal(str)
     source_finished = QtCore.pyqtSignal()
+    video_opened = QtCore.pyqtSignal(int, float)
+    video_position_changed = QtCore.pyqtSignal(int)
+    video_seek_finished = QtCore.pyqtSignal(bool)
     log_message = QtCore.pyqtSignal(str)
     connection_changed = QtCore.pyqtSignal(bool)
     fps_changed = QtCore.pyqtSignal(float)
@@ -70,6 +73,8 @@ class SortingWorker(QtCore.QThread):
         self._reset_requested = False
         self._restart_requested = False
         self._source_change = None
+        self._seek_requested = None
+        self._preview_frame = None
         self._controller = None  # type: Optional[SortingController]
         self._source = None  # type: Optional[FrameSource]
         self._detector = None  # type: Optional[YoloDetector]
@@ -109,6 +114,12 @@ class SortingWorker(QtCore.QThread):
         with self._settings_lock:
             self._source_change = (kind, value)
 
+    def request_video_seek(self, frame_index: int) -> None:
+        self.pause_processing()
+        with self._settings_lock:
+            self._seek_requested = frame_index
+            self._restart_requested = False
+
     def stop(self) -> None:
         self._stop_event.set()
         self._running_event.set()
@@ -133,6 +144,8 @@ class SortingWorker(QtCore.QThread):
             self._restart_requested = False
             source_change = self._source_change
             self._source_change = None
+            seek_requested = self._seek_requested
+            self._seek_requested = None
 
         if reset_requested and self._controller is not None:
             self._controller.reset()
@@ -146,13 +159,50 @@ class SortingWorker(QtCore.QThread):
                 if old_source is not None:
                     old_source.release()
                 self._at_video_end = False
-                self.source_changed.emit(new_source.display_name)
+                self._preview_frame = None
+                self._announce_source()
                 self.detection_changed.emit(None)
                 self.log_message.emit("图像源已切换：{}".format(new_source.display_name))
+                if seek_requested is not None:
+                    self.video_seek_finished.emit(False)
+                    seek_requested = None
+        if seek_requested is not None:
+            self._preview_video_frame(seek_requested)
         if restart_requested and self._source is not None:
             if self._source.restart():
                 self._at_video_end = False
+                self._preview_frame = None
                 self.log_message.emit("视频已从头开始")
+
+    def _announce_source(self) -> None:
+        source = self._source
+        self.source_changed.emit(source.display_name)
+        if source.kind == "video":
+            self.video_opened.emit(max(0, source.frame_count), source.source_fps)
+        else:
+            self.video_opened.emit(0, 0.0)
+
+    def _preview_video_frame(self, frame_index: int) -> None:
+        source = self._source
+        if source is None or source.kind != "video":
+            self.video_seek_finished.emit(False)
+            return
+        next_frame = source.current_frame
+        if source.seek_frame(frame_index):
+            ok, frame = source.read()
+            if ok and frame is not None:
+                self._at_video_end = False
+                # Play the selected frame on resume, including the final frame.
+                self._preview_frame = frame
+                self.frame_ready.emit(self._to_qimage(frame))
+                self.detection_changed.emit(None)
+                self.fps_changed.emit(0.0)
+                self.video_seek_finished.emit(True)
+                self.video_position_changed.emit(frame_index)
+                return
+            source.seek_frame(next_frame)
+        self.log_message.emit("无法跳转到视频第 {} 帧".format(frame_index + 1))
+        self.video_seek_finished.emit(False)
 
     @staticmethod
     def _to_qimage(frame) -> QtGui.QImage:
@@ -205,7 +255,7 @@ class SortingWorker(QtCore.QThread):
             self.log_message.emit("YOLO 权重加载成功：{} ({})".format(self.weights, detector.device))
 
             self._source = create_frame_source(self.source_kind, self.source_value)
-            self.source_changed.emit(self._source.display_name)
+            self._announce_source()
             self.log_message.emit("图像源已打开：{}".format(self._source.display_name))
 
             while not self._stop_event.is_set():
@@ -229,7 +279,11 @@ class SortingWorker(QtCore.QThread):
                     self.msleep(40)
                     continue
 
-                ok, frame = self._source.read() if self._source is not None else (False, None)
+                if self._preview_frame is not None:
+                    ok, frame = True, self._preview_frame
+                    self._preview_frame = None
+                else:
+                    ok, frame = self._source.read() if self._source is not None else (False, None)
                 if not ok or frame is None:
                     if self._source is not None and self._source.kind == "video":
                         self._at_video_end = True
@@ -250,11 +304,13 @@ class SortingWorker(QtCore.QThread):
 
                 # Communication is not faked: only a connected lower controller
                 # receives stable YOLO results and confirms completed actions.
-                if transport.connected:
+                if transport.connected and self._running_event.is_set():
                     self._controller.process_detection(best)
 
                 self._draw_detections(frame, detections)
                 self.frame_ready.emit(self._to_qimage(frame))
+                if self._source.kind == "video":
+                    self.video_position_changed.emit(max(0, self._source.current_frame - 1))
 
                 completed = time.monotonic()
                 frame_times.append(completed)

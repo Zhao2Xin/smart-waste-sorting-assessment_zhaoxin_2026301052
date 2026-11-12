@@ -48,7 +48,16 @@ class Packet:
 
         需要完成长度检查、LENGTH 字段和 CHECKSUM 计算。
         """
-        raise NotImplementedError("请完成 Packet.encode")
+        PAYLOAD = self.payload
+        COMMAND = bytes([self.command])
+        length = 1 + len(self.payload)
+        # 长度校验
+        if length > MAX_BODY_LENGTH:
+            raise ValueError
+        
+        LENGTH = bytes([length])
+        CHECKSUM = bytes([(length + sum(PAYLOAD + COMMAND)) & 0xFF])
+        return HEADER + LENGTH + COMMAND + PAYLOAD + CHECKSUM
 
 
 class StreamParser:
@@ -64,4 +73,41 @@ class StreamParser:
 
     def feed(self, data: bytes) -> List[Packet]:
         """TODO 2：支持半包、粘包、噪声和错误校验后的重新同步。"""
-        raise NotImplementedError("请完成 StreamParser.feed")
+        PacketList = []
+        #将data存入缓存
+        self._buffer += data
+        while True:
+            # 遍历缓存，删除HEADER前噪声
+            noiseIndex = 0
+            for index, byte in enumerate(self._buffer):
+                if(byte == 0xAA and self._buffer[index+1] == 0x55 if index < len(self._buffer) - 1 else True):
+                    break
+                noiseIndex += 1
+            del self._buffer[:noiseIndex]
+
+            if len(self._buffer) > 2:
+                length = self._buffer[2]
+                if length > 64:
+                    self.error_count += 1
+                    del self._buffer[:2]
+                    continue
+                if len(self._buffer) >= length + 4:
+                    if sum(self._buffer[2:3+length]) & 0xFF == self._buffer[3+length]:
+                        #校验通过
+                        COMMAND = self._buffer[3]
+                        PAYLOAD = bytes(self._buffer[4:3+length])
+                        PacketList.append(Packet(COMMAND, PAYLOAD))          
+                        del self._buffer[:4+length]
+                        continue
+                    else:
+                        #校验不通过
+                        self.error_count += 1
+                        del self._buffer[:2]
+                        continue
+                else:
+                    break 
+            else:
+                break
+        return PacketList
+
+

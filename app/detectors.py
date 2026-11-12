@@ -83,4 +83,24 @@ class YoloDetector(Detector):
         返回结果应按置信度从高到低排列。可使用测试中的 FakeYolo 学习接口，
         无需为了完成本方法反复加载真实权重。
         """
-        return []
+        DetectionList = []
+        results = self.model.predict(
+            source = frame,
+            conf = self.confidence,
+            device = self.device,
+            verbose = False,
+        )
+        for result in results:
+            if result.boxes is None:
+                continue
+            for box in result.boxes:
+                id = int(box.cls.item())
+                name = result.names[id]
+                wastetype = self.DEFAULT_CLASS_MAP[name]
+                confidence = float(box.conf.item())
+                x1, y1, x2, y2 = map(int, box.xyxy[0].cpu().numpy())
+                coordinates = (x1, y1, x2, y2)
+                DetectionList.append(Detection(wastetype, name, confidence, coordinates))
+        DetectionList.sort(key=lambda detection: detection.confidence, reverse=True)
+
+        return DetectionList
