@@ -54,6 +54,10 @@ docker compose down
    ```
 
    若驱动无法加载或仍没有视频节点，当前 WSL 内核或摄像头可能不支持这套配置。可以先用默认视频验收，或用 Windows 本机模式测试摄像头。摄像头连接到 WSL 期间，Windows 应用无法同时使用它。用完后可运行 `usbipd detach --busid $cameraBusId` 将设备交还给 Windows，重插或重启后可能需要重新执行 `attach`。
+   
+   ```powershell
+   docker compose -f compose.yaml -f compose.camera.yaml up -d
+   ```
 
 ### Linux 主机和容器设备映射
 
