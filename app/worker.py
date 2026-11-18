@@ -40,6 +40,7 @@ class SortingWorker(QtCore.QThread):
     video_opened = QtCore.pyqtSignal(int, float)
     video_position_changed = QtCore.pyqtSignal(int)
     video_seek_finished = QtCore.pyqtSignal(bool)
+    video_step_finished = QtCore.pyqtSignal()
     log_message = QtCore.pyqtSignal(str)
     connection_changed = QtCore.pyqtSignal(bool)
     fps_changed = QtCore.pyqtSignal(float)
@@ -74,6 +75,7 @@ class SortingWorker(QtCore.QThread):
         self._restart_requested = False
         self._source_change = None
         self._seek_requested = None
+        self._step_requested = False
         self._preview_frame = None
         self._controller = None  # type: Optional[SortingController]
         self._source = None  # type: Optional[FrameSource]
@@ -120,6 +122,10 @@ class SortingWorker(QtCore.QThread):
             self._seek_requested = frame_index
             self._restart_requested = False
 
+    def request_video_step(self) -> None:
+        with self._settings_lock:
+            self._step_requested = True
+
     def stop(self) -> None:
         self._stop_event.set()
         self._running_event.set()
@@ -136,7 +142,7 @@ class SortingWorker(QtCore.QThread):
         elif name in ("tx", "rx"):
             self.log_message.emit("{}  {}".format(name.upper(), data["packet"]))
 
-    def _apply_requests(self) -> None:
+    def _apply_requests(self) -> bool:
         with self._settings_lock:
             reset_requested = self._reset_requested
             self._reset_requested = False
@@ -146,6 +152,8 @@ class SortingWorker(QtCore.QThread):
             self._source_change = None
             seek_requested = self._seek_requested
             self._seek_requested = None
+            step_requested = self._step_requested
+            self._step_requested = False
 
         if reset_requested and self._controller is not None:
             self._controller.reset()
@@ -166,6 +174,9 @@ class SortingWorker(QtCore.QThread):
                 if seek_requested is not None:
                     self.video_seek_finished.emit(False)
                     seek_requested = None
+                if step_requested:
+                    self.video_step_finished.emit()
+                    step_requested = False
         if seek_requested is not None:
             self._preview_video_frame(seek_requested)
         if restart_requested and self._source is not None:
@@ -173,6 +184,7 @@ class SortingWorker(QtCore.QThread):
                 self._at_video_end = False
                 self._preview_frame = None
                 self.log_message.emit("视频已从头开始")
+        return step_requested
 
     def _announce_source(self) -> None:
         source = self._source
@@ -272,10 +284,24 @@ class SortingWorker(QtCore.QThread):
                     previous_connection = transport.connected
                     self.connection_changed.emit(previous_connection)
 
-                self._apply_requests()
+                step_requested = self._apply_requests()
                 self._controller.poll()
 
-                if not self._running_event.is_set():
+                single_step = False
+                if step_requested:
+                    source = self._source
+                    single_step = (
+                        not self._running_event.is_set()
+                        and source is not None and source.kind == "video"
+                        and not self._at_video_end and source.current_frame < source.frame_count
+                    )
+                    if single_step:
+                        # A seek preview is already on screen. Read the frame after it.
+                        self._preview_frame = None
+                    else:
+                        self.video_step_finished.emit()
+
+                if not single_step and not self._running_event.is_set():
                     self.msleep(40)
                     continue
 
@@ -295,6 +321,8 @@ class SortingWorker(QtCore.QThread):
                     else:
                         self.log_message.emit("摄像头读取失败")
                         self.msleep(200)
+                    if single_step:
+                        self.video_step_finished.emit()
                     continue
 
                 started = time.monotonic()
@@ -304,13 +332,21 @@ class SortingWorker(QtCore.QThread):
 
                 # Communication is not faked: only a connected lower controller
                 # receives stable YOLO results and confirms completed actions.
-                if transport.connected and self._running_event.is_set():
+                if transport.connected and (single_step or self._running_event.is_set()):
                     self._controller.process_detection(best)
 
                 self._draw_detections(frame, detections)
                 self.frame_ready.emit(self._to_qimage(frame))
                 if self._source.kind == "video":
                     self.video_position_changed.emit(max(0, self._source.current_frame - 1))
+
+                if single_step:
+                    if self._source.current_frame >= self._source.frame_count:
+                        self._at_video_end = True
+                        self.source_finished.emit()
+                    self.fps_changed.emit(0.0)
+                    self.video_step_finished.emit()
+                    continue
 
                 completed = time.monotonic()
                 frame_times.append(completed)

@@ -24,44 +24,37 @@ docker compose down
 
 ### Windows：Docker Desktop + WSL 2
 
-1. 启动 Docker Desktop 并启用 WSL 2 后端。安装 [usbipd-win](https://learn.microsoft.com/en-us/windows/wsl/connect-usb)，安装后重新打开 PowerShell。
+1. 启动 Docker Desktop，选择 WSL 2 后端和 Linux 容器，关闭 Windows 上正在使用摄像头的应用。在项目根目录的 PowerShell 运行 [setup-camera.ps1](setup-camera.ps1)。
 
    ```powershell
-   winget install --interactive --exact dorssel.usbipd-win
+   powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\setup-camera.ps1
    ```
 
-2. 关闭 Windows 上占用摄像头的应用。在**管理员 PowerShell** 里运行下面的命令，从 `usbipd list` 找到要连接的摄像头，把实际的 BUSID 输入进去。已经显示为 `Shared` 的设备可以跳过 `bind`。执行 `attach` 时应有一个正在运行的 WSL 2 环境。
+2. 脚本检查 `usbipd`，缺少时尝试通过 WinGet 安装 [usbipd-win](https://learn.microsoft.com/en-us/windows/wsl/connect-usb)。随后按需共享摄像头、挂接到 `docker-desktop` 的 WSL 2 环境、加载 `uvcvideo`，并等待采集节点出现。首次共享时，如果 Windows 弹出管理员权限提示，点「是」。
+
+3. 如果脚本无法唯一确定摄像头，先用 `usbipd list` 查询 BUSID，再用 `-BusId` 指定设备。下面以本项目演示用的 `4-2` 为例。如果脚本列出了多个采集节点，可再用 `-VideoDevice /dev/video2` 指定其中一个，路径以脚本输出为准。
 
    ```powershell
    usbipd list
-   $cameraBusId = Read-Host '输入摄像头的 BUSID'
-   usbipd bind --busid $cameraBusId
-   usbipd attach --wsl --busid $cameraBusId
-   usbipd list
+   powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\setup-camera.ps1 -BusId 4-2
    ```
 
-3. 确认摄像头显示为 `Attached` 后，检查 Docker 所在的 Linux 环境是否有视频设备：
+看到 `Configured ... in compose.camera.yaml` 后，摄像头映射已经写入并通过 Compose 校验。脚本到这里结束，镜像构建和容器启动见下方「手动构建和启动」。
 
-   ```powershell
-   wsl -d docker-desktop -- sh -c 'ls -l /dev/video*'
-   ```
+#### 复位摄像头
 
-   如果已经 `Attached` 但没有视频节点，可尝试加载 UVC 驱动，再检查一次：
+用完摄像头或准备重新演示配置时，先停止带设备映射的容器，再运行 [reset-camera.ps1](reset-camera.ps1)。
 
-   ```powershell
-   wsl -d docker-desktop -u root -- modprobe uvcvideo
-   wsl -d docker-desktop -- sh -c 'ls -l /dev/video*'
-   ```
+```powershell
+docker compose -f compose.yaml -f compose.camera.yaml down
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\reset-camera.ps1
+```
 
-   若驱动无法加载或仍没有视频节点，当前 WSL 内核或摄像头可能不支持这套配置。可以先用默认视频验收，或用 Windows 本机模式测试摄像头。摄像头连接到 WSL 期间，Windows 应用无法同时使用它。用完后可运行 `usbipd detach --busid $cameraBusId` 将设备交还给 Windows，重插或重启后可能需要重新执行 `attach`。
-   
-   ```powershell
-   docker compose -f compose.yaml -f compose.camera.yaml up -d
-   ```
+复位脚本针对演示机器上的 HP 摄像头（BUSID `4-2`，硬件 ID `30c9:011d`）。它先解除 WSL 挂接，再取消 USB 共享。出现管理员确认时点「是」，看到 `Not shared` 即可开始下一轮演示。`usbipd`、WSL 驱动和 `compose.camera.yaml` 都可以继续用于下次配置。其他摄像头可用 `usbipd list` 查到自己的 BUSID，再用 `usbipd detach --busid 实际编号` 解除挂接，并在管理员 PowerShell 中用 `usbipd unbind --busid 实际编号` 取消共享。
 
 ### Linux 主机和容器设备映射
 
-直接在 Linux 上运行 Docker 时，跳过 USB/IP 步骤，在宿主机上用 `ls -l /dev/video*` 确认设备。Windows 完成 WSL 转接后也从这里继续。
+直接在 Linux 上运行 Docker 时，在宿主机上用 `ls -l /dev/video*` 确认设备。Windows 上的配置脚本会生成或复用下面的设备映射。
 
 在项目根目录创建 `compose.camera.yaml`，与 `compose.yaml` 放在一起：
 
@@ -74,8 +67,18 @@ services:
 
 左边是 Docker 所在的 Linux 环境里的设备，右边是容器里的设备。若实际采集节点是 `/dev/video2`，可以改成 `/dev/video2:/dev/video0`，界面仍选摄像头编号 **0**。映射格式见 [Docker Compose devices](https://docs.docker.com/reference/compose-file/services/#devices)。
 
+### 手动构建和启动
+
+首次构建镜像或代码有改动时，在项目根目录运行以下命令。
+
 ```bash
-docker compose -f compose.yaml -f compose.camera.yaml up --build -d
+docker compose -f compose.yaml -f compose.camera.yaml build
+```
+
+有本地镜像后，启动容器并检查设备映射。
+
+```bash
+docker compose -f compose.yaml -f compose.camera.yaml up -d --no-build --pull never
 docker compose -f compose.yaml -f compose.camera.yaml exec app ls -l /dev/video0
 ```
 

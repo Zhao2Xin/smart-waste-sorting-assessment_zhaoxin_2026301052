@@ -7,30 +7,9 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from .communication_view import CommunicationView
 from .controller import SystemState
 from .detectors import Detection
+from .promo_video import PromoVideoPage, VideoPreview
 from .protocol import WASTE_NAMES, WasteType
 from .worker import SortingWorker
-
-
-class VideoPreview(QtWidgets.QLabel):
-    def __init__(self, text: str) -> None:
-        super().__init__(text)
-        self._image = QtGui.QImage()
-        self.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Ignored)
-
-    def show_image(self, image: QtGui.QImage) -> None:
-        self._image = image
-        self._scale_image()
-
-    def _scale_image(self) -> None:
-        if not self._image.isNull():
-            self.setPixmap(QtGui.QPixmap.fromImage(self._image).scaled(
-                self.contentsRect().size(), QtCore.Qt.KeepAspectRatio,
-                QtCore.Qt.SmoothTransformation,
-            ))
-
-    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
-        super().resizeEvent(event)
-        self._scale_image()
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -38,10 +17,13 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.worker = worker
         self._processing = False
+        self._resume_after_promo = False
         self._video_frames = 0
         self._video_fps = 0.0
         self._video_frame = 0
         self._seeking = False
+        self._stepping = False
+        self._video_has_next_frame = False
         self.count_labels = {}  # type: Dict[str, QtWidgets.QLabel]
         self.bin_labels = {}  # type: Dict[str, QtWidgets.QLabel]
         self._build_ui()
@@ -61,13 +43,24 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.worker.start()
         if self._auto_start:
-            QtCore.QTimer.singleShot(500, self.toggle_processing)
+            QtCore.QTimer.singleShot(500, self._start_automatically)
+
+    def _start_automatically(self) -> None:
+        if self.pages.currentWidget() is self.promo_page:
+            self._resume_after_promo = True
+        elif not self._processing and not (self._seeking or self._stepping):
+            self.toggle_processing()
 
     def _build_ui(self) -> None:
         self.setWindowTitle("智能垃圾分拣系统 · 招新考核")
         self.resize(1180, 775)
         central = QtWidgets.QWidget()
-        self.setCentralWidget(central)
+        self.dashboard = central
+        self.pages = QtWidgets.QStackedWidget()
+        self.pages.addWidget(central)
+        self.promo_page = PromoVideoPage()
+        self.pages.addWidget(self.promo_page)
+        self.setCentralWidget(self.pages)
         root = QtWidgets.QVBoxLayout(central)
         root.setContentsMargins(14, 12, 14, 12)
         root.setSpacing(10)
@@ -185,12 +178,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.controls_layout = controls_layout = QtWidgets.QHBoxLayout(controls)
         self.video_button = QtWidgets.QPushButton("导入视频")
         self.camera_button = QtWidgets.QPushButton("打开摄像头")
+        self.promo_button = QtWidgets.QPushButton("播放宣传视频")
+        self.promo_button.setObjectName("promoButton")
         self.start_button = QtWidgets.QPushButton("开始识别")
         self.start_button.setObjectName("primaryButton")
         self.reset_button = QtWidgets.QPushButton("重置统计")
         self.quit_button = QtWidgets.QPushButton("退出")
         controls_layout.addWidget(self.video_button)
         controls_layout.addWidget(self.camera_button)
+        controls_layout.addWidget(self.promo_button)
         controls_layout.addStretch(1)
         controls_layout.addWidget(self.start_button)
         controls_layout.addWidget(self.reset_button)
@@ -211,6 +207,11 @@ class MainWindow(QtWidgets.QMainWindow):
             "#primaryButton { background: #08685d; color: white; border-color: #08685d; }"
             "#primaryButton:hover, #primaryButton:focus { background: #0c8073; }"
             "#primaryButton:disabled { background: #e1eae8; color: #526b67; border-color: #d2dedb; }"
+            "#promoButton { background: #1759a6; color: white; border-color: #1759a6; }"
+            "#promoButton:hover, #promoButton:focus { background: #12477f; }"
+            "#promoButton:pressed { background: #103963; }"
+            "#stepButton:enabled { background: #d7eedc; color: #234634; border-color: #9ec6a8; }"
+            "#stepButton:enabled:hover, #stepButton:enabled:focus { background: #c5e5cf; }"
             "#titleLabel { color: #17323c; }"
             "#statusValue { background: #dce9ee; border-radius: 5px; padding: 3px 7px; }"
             "#detectionValue { background: #dce9ee; border-radius: 5px; padding: 2px 7px;"
@@ -240,6 +241,10 @@ class MainWindow(QtWidgets.QMainWindow):
         for button in (self.previous_frame, self.next_frame, self.first_frame):
             steps.addWidget(button)
         steps.addStretch()
+        self.step_button = QtWidgets.QPushButton("识别下一帧画面")
+        self.step_button.setObjectName("stepButton")
+        self.step_button.setEnabled(False)
+        steps.addWidget(self.step_button)
         timeline_layout.addLayout(steps)
         layout.addWidget(self.timeline)
         self.timeline.hide()
@@ -247,6 +252,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _connect_signals(self) -> None:
         self.video_button.clicked.connect(self.import_video)
         self.camera_button.clicked.connect(self.open_camera)
+        self.promo_button.clicked.connect(self.show_promo)
+        self.promo_page.back_requested.connect(self.hide_promo)
         self.start_button.clicked.connect(self.toggle_processing)
         self.reset_button.clicked.connect(self.worker.request_reset)
         self.quit_button.clicked.connect(self.close)
@@ -264,11 +271,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.worker.video_opened.connect(self.set_video_metadata)
         self.worker.video_position_changed.connect(self.update_video_position)
         self.worker.video_seek_finished.connect(self.finish_video_seek)
+        self.worker.video_step_finished.connect(self.finish_video_step)
+        self.worker.finished.connect(self._on_worker_finished)
         self.video_slider.sliderMoved.connect(self._show_video_position)
         self.video_slider.valueChanged.connect(self.seek_video)
         self.previous_frame.clicked.connect(lambda: self.seek_video(self._video_frame - 1))
         self.next_frame.clicked.connect(lambda: self.seek_video(self._video_frame + 1))
         self.first_frame.clicked.connect(lambda: self.seek_video(0))
+        self.step_button.clicked.connect(self.recognize_next_frame)
         self.clear_log_button.clicked.connect(self.confirm_clear_log)
         self.raw_frames.toggled.connect(self.log_browser.show_raw)
 
@@ -303,6 +313,27 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.worker.request_source("camera", str(camera_index))
 
+    @QtCore.pyqtSlot()
+    def show_promo(self) -> None:
+        try:
+            self.promo_page.start()
+        except (OSError, RuntimeError) as exc:
+            QtWidgets.QMessageBox.warning(self, "宣传视频", str(exc))
+            return
+        self._resume_after_promo = self._processing
+        if self._processing:
+            self._set_processing(False)
+        self.pages.setCurrentWidget(self.promo_page)
+
+    @QtCore.pyqtSlot()
+    def hide_promo(self) -> None:
+        self.promo_page.stop()
+        self.pages.setCurrentWidget(self.dashboard)
+        self.promo_button.setFocus()
+        if self._resume_after_promo:
+            self._set_processing(True)
+        self._resume_after_promo = False
+
     def _set_processing(self, enabled: bool) -> None:
         self._processing = enabled
         if enabled:
@@ -311,10 +342,11 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.worker.pause_processing()
             self.start_button.setText("开始识别")
+        self._update_step_button()
 
     @QtCore.pyqtSlot()
     def toggle_processing(self) -> None:
-        if self._seeking:
+        if self._seeking or self._stepping:
             return
         self._set_processing(not self._processing)
         self.append_log("视觉识别已{}".format("启动" if self._processing else "暂停"))
@@ -324,16 +356,19 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._seeking:
             return
         self._processing = False
+        self._video_has_next_frame = False
         self.start_button.setText("重新播放")
+        self._update_step_button()
 
     @QtCore.pyqtSlot(int, float)
     def set_video_metadata(self, frames: int, fps: float) -> None:
         self._video_frames = frames
         self._video_fps = fps
+        self._video_has_next_frame = frames > 0
         if frames > 0:
             self.timeline_steps.addWidget(self.start_button)
         else:
-            self.controls_layout.insertWidget(3, self.start_button)
+            self.controls_layout.insertWidget(4, self.start_button)
         self.start_button.show()
         self.timeline.setVisible(frames > 0)
         with QtCore.QSignalBlocker(self.video_slider):
@@ -341,6 +376,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.video_slider.setValue(0)
         self._video_frame = 0
         self._show_video_position(0)
+        self._update_step_button()
 
     @QtCore.pyqtSlot(str)
     def update_source_label(self, source: str) -> None:
@@ -372,19 +408,20 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._seeking or self.video_slider.isSliderDown() or not self._video_frames:
             return
         self._video_frame = min(max(0, frame), self._video_frames - 1)
+        self._video_has_next_frame = self._video_frame < self._video_frames - 1
         with QtCore.QSignalBlocker(self.video_slider):
             self.video_slider.setValue(self._video_frame)
         self._show_video_position(self._video_frame)
+        self._update_step_button()
 
     @QtCore.pyqtSlot(int)
     def seek_video(self, frame: int) -> None:
-        if self._seeking or not 0 <= frame < self._video_frames:
+        if self._seeking or self._stepping or not 0 <= frame < self._video_frames:
             return
         self._seeking = True
         self._processing = False
         self.start_button.setText("开始识别")
-        self.start_button.setEnabled(False)
-        self.timeline.setEnabled(False)
+        self._update_timeline_controls()
         with QtCore.QSignalBlocker(self.video_slider):
             self.video_slider.setValue(frame)
         self._show_video_position(frame)
@@ -393,10 +430,42 @@ class MainWindow(QtWidgets.QMainWindow):
     @QtCore.pyqtSlot(bool)
     def finish_video_seek(self, succeeded: bool) -> None:
         self._seeking = False
-        self.start_button.setEnabled(True)
-        self.timeline.setEnabled(True)
+        self._update_timeline_controls()
         if not succeeded:
-            self.update_video_position(self._video_frame)
+            with QtCore.QSignalBlocker(self.video_slider):
+                self.video_slider.setValue(self._video_frame)
+            self._show_video_position(self._video_frame)
+
+    def _update_step_button(self) -> None:
+        self.step_button.setEnabled(
+            self.worker.isRunning() and self._video_has_next_frame
+            and not (self._processing or self._seeking or self._stepping)
+        )
+
+    def _update_timeline_controls(self) -> None:
+        available = not (self._seeking or self._stepping)
+        self.start_button.setEnabled(available)
+        self.timeline.setEnabled(available)
+        self._update_step_button()
+
+    @QtCore.pyqtSlot()
+    def recognize_next_frame(self) -> None:
+        if not self.step_button.isEnabled():
+            return
+        self._stepping = True
+        self._update_timeline_controls()
+        self.worker.request_video_step()
+
+    @QtCore.pyqtSlot()
+    def finish_video_step(self) -> None:
+        self._stepping = False
+        self._update_timeline_controls()
+
+    @QtCore.pyqtSlot()
+    def _on_worker_finished(self) -> None:
+        if self._stepping:
+            self.finish_video_step()
+        self.step_button.setEnabled(False)
 
     @QtCore.pyqtSlot(QtGui.QImage)
     def update_frame(self, image: QtGui.QImage) -> None:
@@ -459,6 +528,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.connection_label.setStyleSheet("color: #2e7d32;" if connected else "color: #c62828;")
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        self.promo_page.stop()
         self.worker.stop()
         if not self.worker.wait(5000):
             self.append_log("工作线程未在规定时间内退出")
