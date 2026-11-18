@@ -11,7 +11,7 @@ docker compose up --build -d
 docker compose ps
 ```
 
-浏览器打开 [noVNC 操作界面](http://localhost:6080/vnc.html?autoconnect=1&resize=scale)。默认会播放 `assets/assessment_demo.mp4`，并连接容器网络内的模拟下位机 `lower-sim:9000`。该模式无需摄像头或实体串口。修改源码后用 `--build` 重新构建。如果只是再次启动已构建的版本，可以用 `docker compose up -d`。
+浏览器打开 [noVNC 操作界面](http://localhost:6080/vnc.html?autoconnect=1&resize=scale)。程序启动后会准备默认视频 `assets/assessment_demo.mp4`，并连接容器网络内的模拟下位机 `lower-sim:9000`。此时可以先「导入视频」或「打开摄像头」，然后点击「开始识别」。也可以直接点击「开始识别」播放默认视频。默认视频模式无需摄像头或实体串口。修改源码后用 `--build` 重新构建。如果只是再次启动已构建的版本，可以用 `docker compose up -d`。
 
 ```bash
 docker compose logs --tail 100 app lower-sim
@@ -92,7 +92,7 @@ docker compose -f compose.yaml -f compose.camera.yaml exec app ls -l /dev/video0
 
 ## 操作与验收
 
-1. 播放默认演示视频，观察检测框、类别和置信度。右侧通信日志按轮次展示发送、确认和完成消息。勾选「显示原始帧」可核对十六进制报文，确认分类计数在动作完成后更新。
+1. 点击「开始识别」播放默认演示视频，观察检测框、类别和置信度。右侧通信日志按轮次展示发送、确认和完成消息。勾选「显示原始帧」可核对十六进制报文，确认分类计数在动作完成后更新。
 2. 点击「导入视频」，在 Docker 界面中选择 `/workspace/vedio/dep.mp4`。拖动进度条、逐帧查看或回到开头时，界面会暂停预览，点击「开始识别」后继续分拣。
 3. 按前面的设备映射说明打开摄像头，验证视频和实时输入可以切换。选择「清空日志」并确认后，通信面板清空，分类计数继续保留。
 4. 在已安装项目依赖的环境中运行公开测试：
@@ -114,7 +114,7 @@ python -m simulator.lower_simulator --host 127.0.0.1 --port 9000
 第二个启动上位机：
 
 ```bash
-python -m app.main --sim-host 127.0.0.1 --sim-port 9000 --auto-start
+python -m app.main --sim-host 127.0.0.1 --sim-port 9000
 ```
 
 ## Jetson Nano
